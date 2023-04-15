@@ -1,0 +1,519 @@
+---
+title: "DASC_5420_Final_Project"
+author: "Changda Li (T00705321)"
+date: "2023-04-10"
+output: pdf_document
+---
+# Reading data
+```{r}
+library(dplyr)
+library(tidyverse)
+library(ggplot2)
+library(reshape2)
+library(pheatmap)
+library(caret)
+library(ROSE)
+library(ROCR)
+library(pROC)
+library(plotROC)
+set.seed(123)
+setwd("/Users/changdali/Desktop/data science related/DASC 5420/Final_project")
+heart_data <- read.csv("heart_2020_cleaned.csv")
+head(heart_data)
+colnames(heart_data)
+#heart_data <- sample_n(heart_data, 5*10^4)
+```
+# Data Preprocessing
+```{r}
+set.seed(123)
+# Identify categorical and continuous variables
+cat_var <- c("Smoking",
+             "AlcoholDrinking",
+             "Stroke",
+             "DiffWalking",
+             "Sex",
+             "AgeCategory",
+             "Race",
+             "Diabetic",
+             "PhysicalActivity",
+             "GenHealth",
+             "Asthma",
+             "KidneyDisease",
+             "SkinCancer")
+con_var <- c("BMI",
+             "PhysicalHealth",
+             "MentalHealth",
+             "SleepTime")
+
+# Factor the categorical variables
+for (name in cat_var){
+  heart_data[[name]] <- factor(heart_data[[name]])
+}
+
+# Scale the continuous data
+heart_data[con_var] <- scale(heart_data[con_var])
+
+heart_data$HeartDisease <- factor(heart_data$HeartDisease)
+```
+
+# EDA
+```{r}
+set.seed(123)
+library(ggplot2)
+library(tidyr)
+library(corrplot)
+# plot bar chart of the target variable
+target_data <- data.frame(status = heart_data$HeartDisease)
+ggplot(target_data, aes(x = status, fill = status)) +
+  geom_bar() +
+  labs(title = "Heart Disease Counts", 
+       x = "Heart disease status", 
+       y = "Frequency")
+
+# Create the plot
+ggplot(heart_data, aes(x = Sex, fill = HeartDisease))+
+  geom_bar(position = "identity") +
+  labs(x = "Sex", y = "Frequency") 
+
+cat_w_target <- data.frame(heart_data[,cat_var],
+                           HeartDisease = heart_data[,1])
+cat_w_target_long <- gather(cat_w_target, key = "variable", value = "value", -HeartDisease)
+ggplot(cat_w_target_long, aes(x = value, fill = HeartDisease)) +
+  geom_bar(position = "fill", alpha = 0.5) +
+  facet_wrap(~variable, scales = "free", ncol = 3) +
+  labs(x = "Catgorical Variable", y = "Proportion") +
+  theme_bw()
+```
+# Train test split
+```{r}
+set.seed(123)
+library(caret)
+train_ind <- createDataPartition(heart_data$HeartDisease,
+                                 p = 0.7,
+                                 list = FALSE)
+train <- heart_data[train_ind,]
+test <- heart_data[-train_ind,]
+```
+# Logistic regression
+## Train logistic model and evaluate
+```{r}
+set.seed(123)
+ctrl <- trainControl(method = "cv", number = 10)
+log_model <- train(HeartDisease~.,
+                   data = train,
+                   method = "glm",
+                   trControl = ctrl, 
+                   family = binomial)
+
+vali_accuracy <- log_model$results$Accuracy
+cat("The validation accuracy is", vali_accuracy, "\n")
+
+log_pred <- predict(log_model, newdata = test)
+log_pred_auc <- predict(log_model, newdata = test, type = "prob")
+
+roc_obj <- roc(response = test$HeartDisease, 
+               predictor = log_pred_auc$Yes, 
+               levels = c("No", "Yes"))
+cat("The AUC is", auc(roc_obj), "\n")
+plot(roc_obj, main = "ROC Curve")
+
+log_cm_no <- confusionMatrix(log_pred,
+                             test$HeartDisease, 
+                             mode = "everything",
+                             positive="No")
+log_cm_yes <- confusionMatrix(log_pred,
+                              test$HeartDisease, 
+                              mode = "everything",
+                              positive="Yes")
+cat("The test accuracy is", log_cm_no$overall["Accuracy"], "\n")
+cat("The precision, recall and F1 of 'No' class are \n",
+    log_cm_no$byClass["Precision"],"\n",
+    log_cm_no$byClass["Recall"],"\n",
+    log_cm_no$byClass["F1"],"\n")
+cat("The precision, recall and F1 of 'Yes' class are \n",
+    log_cm_yes$byClass["Precision"],"\n",
+    log_cm_yes$byClass["Recall"],"\n",
+    log_cm_yes$byClass["F1"],"\n")
+```
+Even though the overall accuracy of the model is high, the values of precision, recall and F1 score are relatively low. This is due to the class imbalance of the data set.
+
+## Balance the data
+under sample the data:
+```{r}
+library(ROSE)
+set.seed(123)
+num_of_yes <- sum(heart_data$HeartDisease == "Yes")
+new_frac <- 0.5
+new_n <- num_of_yes / new_frac
+balance_heart <- ovun.sample(formula = HeartDisease ~.,
+                             data = heart_data,
+                             method = "under",
+                             N = new_n,
+                             seed = 5420)
+balance_heart <- balance_heart$data
+```
+
+## Train test split for balance data
+```{r}
+set.seed(123)
+train_ind_b <- createDataPartition(balance_heart$HeartDisease,
+                                   p = 0.7,
+                                   list = FALSE)
+train_b <- balance_heart[train_ind_b,]
+test_b <- balance_heart[-train_ind_b,]
+```
+
+## Train logistic model on balance data
+```{r}
+set.seed(123)
+# Using 10 folds cross validation
+ctrl <- trainControl(method = "cv", number = 10)
+log_model_b <- train(HeartDisease~.,
+                     data = train_b,
+                     method = "glm",
+                     trControl = ctrl, 
+                     family = binomial)
+vali_accuracy_b <- log_model_b$results$Accuracy
+cat("The validation accuracy is", vali_accuracy_b, "\n")
+
+log_pred_b <- predict(log_model_b, newdata = test_b)
+log_pred_b_auc <- predict(log_model_b, 
+                          newdata = test_b, 
+                          type = "prob")
+
+roc_obj_b <- roc(response = test_b$HeartDisease, 
+                 predictor = log_pred_b_auc$Yes, 
+                 levels = c("No", "Yes"))
+cat("The AUC is", auc(roc_obj_b), "\n")
+plot(roc_obj_b, main = "ROC Curve")
+
+log_cm_no_b <- confusionMatrix(log_pred_b,
+                               test_b$HeartDisease, 
+                               mode = "everything",
+                               positive="No")
+log_cm_yes_b <- confusionMatrix(log_pred_b,
+                                test_b$HeartDisease,  
+                                mode = "everything",
+                                positive="Yes")
+cat("The test accuracy is", log_cm_no_b$overall["Accuracy"], "\n")
+cat("The precision, recall and F1 of 'No' class for balanced data set are \n",
+    log_cm_no_b$byClass["Precision"],"\n",
+    log_cm_no_b$byClass["Recall"],"\n",
+    log_cm_no_b$byClass["F1"],"\n")
+cat("The precision, recall and F1 of 'Yes' class for balanced data set are \n",
+    log_cm_yes_b$byClass["Precision"],"\n",
+    log_cm_yes_b$byClass["Recall"],"\n",
+    log_cm_yes_b$byClass["F1"],"\n")
+```
+
+# Lasso regression imbalance
+## Train test split
+```{r}
+set.seed(123)
+# Transfer the factor variables of character to numbers
+formula <- formula(paste("~", paste(cat_var, collapse = " + ")))
+fac_col <- model.matrix(formula, heart_data)
+heart_lasso <- data.frame(HeartDisease =
+                            factor(heart_data$HeartDisease,
+                                   levels = c("Yes","No"),
+                                   labels = c(1,0)),
+                          heart_data[, con_var],
+                          fac_col[, 2:ncol(fac_col)])
+# Train test split
+train_ind_l <- createDataPartition(heart_lasso$HeartDisease,
+                                   p = 0.7,
+                                   list = FALSE)
+train_l <- heart_lasso[train_ind_l,]
+test_l <- heart_lasso[-train_ind_l,]
+train_x_l <- train_l[,-1]
+train_y_l <- train_l[,1]
+
+test_x_l <- test_l[,-1]
+test_y_l <- test_l[,1]
+```
+
+## Find the optimal lambda using cv
+```{r}
+set.seed(123)
+library(glmnet)
+# train the model with training set using cross validation
+cv_lasso <- cv.glmnet(as.matrix(train_x_l),
+                      train_y_l,
+                      family = "binomial",
+                      alpha=1,
+                      type.measure="class",
+                      nfolds=10)
+
+optimal_lambda <- cv_lasso$lambda.min
+```
+## Evaluation lasso imbalance
+```{r}
+set.seed(123)
+# The validation error for the optimal lambda
+cvm_min <- cv_lasso$cvm[which.min(cv_lasso$cvm)]
+vali_acc_la <- 1 - cvm_min
+cat("The validation accuracy is", vali_acc_la , "\n")
+
+lasso_model <- glmnet(as.matrix(train_x_l),
+                      train_y_l,
+                      family = "binomial",
+                      alpha = 1,
+                      lambda = optimal_lambda)
+
+lasso_pred <- predict(lasso_model,
+                      newx = as.matrix(test_x_l),
+                      type = "class")
+lasso_pred_auc <- predict(lasso_model,
+                          newx = as.matrix(test_x_l),
+                          type = "response")
+
+roc_l <- roc(test_y_l, lasso_pred_auc)
+cat("The AUC is", auc(roc_l), "\n")
+
+plot(roc_l, main = "ROC Curve",
+     legacy.axes = FALSE,
+     col = "blue")
+lines(roc_l_b, col = "red")
+
+lasso_cm_no <- confusionMatrix(factor(lasso_pred,
+                                   levels = c(1,0)),
+                               test_y_l, 
+                               mode = "everything",
+                               positive = "0")
+lasso_cm_yes <- confusionMatrix(factor(lasso_pred,
+                                   levels = c(1,0)),
+                                test_y_l, 
+                                mode = "everything",
+                                positive = "1")
+
+cat("The test accuracy is", lasso_cm_yes$overall["Accuracy"] , "\n")
+
+cat("The precision, recall and F1 of 'No' class are \n",
+    lasso_cm_no$byClass["Precision"],"\n",
+    lasso_cm_no$byClass["Recall"],"\n",
+   lasso_cm_no$byClass["F1"],"\n")
+cat("The precision, recall and F1 of 'Yes' class are \n",
+    lasso_cm_yes$byClass["Precision"],"\n",
+    lasso_cm_yes$byClass["Recall"],"\n",
+    lasso_cm_yes$byClass["F1"],"\n")
+```
+## Balance the data undersample
+```{r}
+set.seed(123)
+num_of_yes <- sum(heart_data$HeartDisease == "Yes")
+new_frac <- 0.5
+new_n <- num_of_yes / new_frac
+balance_heart_lasso <- ovun.sample(formula = HeartDisease ~.,
+                             data = heart_lasso,
+                             method = "under",
+                             N = new_n,
+                             seed = 5420)
+balance_heart_lasso <- balance_heart_lasso$data
+```
+## Redo lasso for the balanced data
+```{r}
+set.seed(123)
+# Train test split
+train_ind_l_b <- createDataPartition(balance_heart_lasso$HeartDisease,
+                                   p = 0.7,
+                                   list = FALSE)
+
+train_l_b <- balance_heart_lasso[train_ind_l_b,]
+test_l_b <- balance_heart_lasso[-train_ind_l_b,]
+
+train_x_l_b <- train_l_b[,-1]
+train_y_l_b <- train_l_b[,1]
+
+test_x_l_b <- test_l_b[,-1]
+test_y_l_b <- test_l_b[,1]
+```
+## Fit lasso on balanced data
+```{r}
+set.seed(123)
+# Find the optimal lambda
+cv_lasso_b <- cv.glmnet(as.matrix(train_x_l_b),
+                      train_y_l_b,
+                      family = "binomial",
+                      alpha=1,
+                      type.measure="class",
+                      nfolds=10)
+
+optimal_lambda_b <- cv_lasso_b$lambda.min
+```
+## Evaluation lasso balance
+```{r}
+set.seed(123)
+# The validation acc for the optimal lambda
+cvm_min_b <- cv_lasso_b$cvm[which.min(cv_lasso_b$cvm)]
+vali_acc_la_b <- 1 - cvm_min_b
+cat("The validation accuracy is", vali_acc_la_b, "\n")
+
+lasso_model_b <- glmnet(as.matrix(train_x_l_b),
+                        train_y_l_b,
+                        family = "binomial",
+                        alpha = 1,
+                        lambda = optimal_lambda_b)
+lasso_pred_b <- predict(lasso_model_b,
+                        newx = as.matrix(test_x_l_b),
+                        type = "class")
+
+lasso_pred_b_auc <- predict(lasso_model_b,
+                            newx = as.matrix(test_x_l_b),
+                            type = "response")
+
+roc_l_b <- roc(test_y_l_b, lasso_pred_b_auc)
+cat("The AUC is", auc(roc_l_b), "\n")
+
+lasso_cm_no_b <- confusionMatrix(factor(lasso_pred_b),                                                test_y_l_b,
+                                 mode = "everything",
+                                 positive = "0")
+lasso_cm_yes_b <- confusionMatrix(factor(lasso_pred_b),                                                test_y_l_b,
+                                  mode = "everything",
+                                  positive = "1")
+
+cat("The test accuracy is", lasso_cm_yes_b$overall["Accuracy"] , "\n")
+
+cat("The precision, recall and F1 of 'No' class are \n",
+    lasso_cm_no_b$byClass["Precision"],"\n",
+    lasso_cm_no_b$byClass["Recall"],"\n",
+    lasso_cm_no_b$byClass["F1"],"\n")
+cat("The precision, recall and F1 of 'Yes' class are \n",
+    lasso_cm_yes_b$byClass["Precision"],"\n",
+    lasso_cm_yes_b$byClass["Recall"],"\n",
+    lasso_cm_yes_b$byClass["F1"],"\n")
+```
+# Decision tree
+```{r}
+library(rpart)
+folds <- createFolds(train$HeartDisease, k = 10)
+
+# Train and evaluate the decision tree model with cross-validation
+tree_model <- rpart(HeartDisease ~ ., data = train)
+tree_cv <- train(HeartDisease ~ ., 
+                 data = train,
+                 method = "rpart",
+                 trControl = 
+                   trainControl(method = "cv", index =folds))
+# Print
+cat("The validation accuracy is",
+    tree_cv$results$Accuracy[which.max(tree_cv$results$Accuracy)], "\n")
+```
+## Evaluation decsion tree imbalance
+```{r}
+set.seed(123)
+# Train the model with the best cp
+tree_model <- rpart(HeartDisease ~ .,
+                    data=train,
+                    cp=tree_cv$bestTune$cp)
+
+d_pred <- predict(tree_model, newdata=test, type="class")
+d_pred_auc <- predict(tree_model, newdata=test, type="prob")
+
+roc_dt <- roc(response = test$HeartDisease, 
+              predictor = d_pred_auc[,2], 
+              levels = c("No", "Yes"))
+cat("The AUC is", auc(roc_dt), "\n")
+
+
+d_cm_yes <- confusionMatrix(d_pred, 
+                            test$HeartDisease,
+                            mode = "everything",
+                            positive = "Yes")
+
+d_cm_no <- confusionMatrix(d_pred, 
+                           test$HeartDisease,
+                           mode = "everything",
+                           positive = "No")
+
+cat("The test accuracy is", d_cm_no$overall["Accuracy"] , "\n")
+
+cat("The precision, recall and F1 of 'No' class are \n",
+    d_cm_no$byClass["Precision"],"\n",
+    d_cm_no$byClass["Recall"],"\n",
+   d_cm_no$byClass["F1"],"\n")
+cat("The precision, recall and F1 of 'Yes' class are \n",
+    d_cm_yes$byClass["Precision"],"\n",
+    d_cm_yes$byClass["Recall"],"\n",
+    d_cm_yes$byClass["F1"],"\n")
+```
+## Balance the data for DT
+```{r}
+set.seed(123)
+num_of_yes <- sum(heart_data$HeartDisease == "Yes")
+new_frac <- 0.5
+new_n <- num_of_yes / new_frac
+balance_heart_d <- ovun.sample(formula = HeartDisease ~.,
+                             data = heart_data,
+                             method = "under",
+                             N = new_n,
+                             seed = 5420)
+balance_heart_d <- balance_heart_d$data
+#Train test split
+train_ind_d <- createDataPartition(balance_heart_d$HeartDisease,
+                                   p = 0.7,
+                                   list = FALSE)
+train_d <- balance_heart_d[train_ind_d,]
+test_d <- balance_heart_d[-train_ind_d,]
+```
+## Redo DT for the balanced data
+```{r}
+set.seed(123)
+folds_d <- createFolds(train_d$HeartDisease, k = 10)
+tree_cv_d <- train(HeartDisease ~ ., 
+                   data = train_d,
+                   method = "rpart",
+                   trControl = 
+                   trainControl(method = "cv", index =folds_d))
+optimal_cp_d <- tree_cv_d$bestTune$cp
+
+cat("The validation accuracy is",
+    tree_cv_d$results$Accuracy[which.max(tree_cv_d$results$Accuracy)], "\n")
+tree_model_d <- rpart(HeartDisease ~ .,
+                      data=train_d,
+                      cp=optimal_cp_d)
+d_pred_b <- predict(tree_model_d, newdata = test_d, type = "class")
+d_pred_b_auc <- predict(tree_model_d, newdata = test_d, type = "prob")
+
+roc_dt_b <- roc(response = test_d$HeartDisease, 
+                predictor = d_pred_b_auc[,2], 
+                levels = c("No", "Yes"))
+cat("The AUC is", auc(roc_dt_b), "\n")
+plot(roc_dt_b, 
+     main = "ROC Curve",
+     col = "blue")
+lines(roc_dt, col = "red")
+
+cm_d_b_no <- confusionMatrix(d_pred_b, 
+                             test_d$HeartDisease,
+                             mode = "everything",
+                             positive = "No")
+cm_d_b_yes <- confusionMatrix(d_pred_b, 
+                              test_d$HeartDisease,
+                              mode = "everything",
+                              positive = "Yes")
+
+cat("The test accuracy is",
+    cm_d_b_yes$overall["Accuracy"], "\n")
+
+cat("The precision, recall and F1 of 'No' class are \n",
+    cm_d_b_no $byClass["Precision"],"\n",
+    cm_d_b_no $byClass["Recall"],"\n",
+   cm_d_b_no $byClass["F1"],"\n")
+cat("The precision, recall and F1 of 'Yes' class are \n",
+    cm_d_b_yes$byClass["Precision"],"\n",
+    cm_d_b_yes$byClass["Recall"],"\n",
+    cm_d_b_yes$byClass["F1"],"\n")
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
